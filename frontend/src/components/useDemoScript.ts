@@ -53,7 +53,7 @@ export function useDemoScript() {
     {
       id: "a",
       name: "A",
-      pin: phase >= 5 ? "pin 1.1 → 1.2" : "pin 1.1",
+      pin: phase >= 5 ? "pin 1.1 to 1.2" : "pin 1.1",
       state: phase >= 5 ? "RESTORED" : phase >= 3 ? "PATCH_REQUIRED" : "PENDING",
       via: phase >= 3 ? "hash" : null,
     },

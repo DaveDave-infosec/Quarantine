@@ -8,6 +8,15 @@ Validators read the code. The host obeys.
 
 Live on GenLayer Studio Network (chainId 61999).
 
+**Live app:** https://quarantine-genlayer.vercel.app
+
+- `/` the primitive at a glance, with the animated Containment Map
+- `/console` the product: every package, advisory and deployment read live from chain, plus every write action
+- `/how-it-works` the pipeline, the decision tables, every guard and the honest limitations
+- `/guide` the live run, then an eight-step path any reviewer can run with the built-in demo wallet, no install and no funds
+
+> **Reviewers:** the fastest proof is the Guide's "Run it yourself" path. A demo wallet registers its own deployment on the compromised 1.1, is blocked by hash, is refused at payout with `skill is quarantined`, re-pins to 1.2 and stays blocked, is restored by reassessment, then pays with exact conservation. Every refusal you see is a deliberate guard, and the table under "Reviewer guide" lists them all.
+
 ---
 
 ## Why this needs GenLayer
@@ -94,7 +103,7 @@ The whole primitive in eight on-chain steps, run on the contracts above.
 | 7 | A bystander wallet reassesses A | `RESTORED` |
 | 8 | Execute through A | pays |
 
-Final ledger: minted 1000, vault 900, paid out 100 across 2 executions. Exact conservation.
+Ledger after the eight steps: minted 1000, vault 900, paid out 100 across 2 executions. Exact conservation. Later demo-wallet runs keep the same identity (minted = vault + paid out), which the console shows live.
 
 **Bystander restore receipt.** Wallet `0xD7cd43cBc01f767A74909943Cec29e20dB4e7cc3` is not the maintainer, not a dependent owner, not the issuer and not the deployer. It reassessed Dependent A and restored it:
 
