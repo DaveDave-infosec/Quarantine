@@ -89,8 +89,8 @@ export default function DependentCard({ view, letter, pkg, advisoryId, pinLabel,
   return (
     <article className={`dep-card s-${state.toLowerCase()}`}>
       <div className="dep-banner" style={{ borderTopColor: color }}>
-        <span className="dep-state" style={{ color }}>
-          {STATE_LABEL[state]}
+        <span className="dep-state" style={{ color: stale ? "var(--s-quarantined)" : color }}>
+          {stale ? "Re-pinned, needs reassessment" : STATE_LABEL[state]}
         </span>
         <span className={`cap cap-${dep.capability}`}>{dep.capability}</span>
       </div>

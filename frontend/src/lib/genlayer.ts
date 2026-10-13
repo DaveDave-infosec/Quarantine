@@ -100,8 +100,22 @@ async function getWriteClient(): Promise<any> {
   return client;
 }
 
+// viem wraps transport failures: its shortMessage is a generic "unknown RPC
+// error" and the real cause ("Failed to fetch") sits in details, message or
+// cause. Read every part so network blips are recognised and retried.
 function errText(e: any): string {
-  return String(e?.shortMessage || e?.message || e || "").toLowerCase();
+  const parts = [
+    e?.shortMessage,
+    e?.details,
+    e?.message,
+    e?.cause?.shortMessage,
+    e?.cause?.message,
+    typeof e === "string" ? e : "",
+  ];
+  return parts
+    .filter((p) => typeof p === "string" && p.length > 0)
+    .join(" ")
+    .toLowerCase();
 }
 
 // Only genuine capacity signals count as busy. A loose match on "rate" also
