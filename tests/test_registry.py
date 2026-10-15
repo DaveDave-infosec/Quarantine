@@ -13,7 +13,7 @@ from qhelp import (
     SHA_10, SHA_11, SHA_12, SHA_ADV, SHA_FORK_UNFIXED, SHA_FORK_FIXED, SHA_SPARE,
     V10, V11, V12,
     MAINTAINER, OWNER_A, OWNER_B, BYSTANDER, DEPLOYER,
-    hx, sha, set_sender, new_vm, deploy_registry, serve, file_url, serve_all,
+    hx, sha, set_sender, new_vm, deploy_registry, serve, file_url, tag_url, serve_all,
     llm, verdict, extract, register_package, open_advisory, add_dependent,
     assess, escalate, repin,
 )
@@ -47,15 +47,18 @@ def test_two_versions_with_identical_bytes_are_rejected():
     c = deploy_registry(vm)
     serve(vm, file_url(PKG, SHA_10), V10)
     serve(vm, file_url(PKG, SHA_11), V10)
+    serve(vm, tag_url(PKG, "1.0"), V10)
+    serve(vm, tag_url(PKG, "1.1"), V10)
     with vm.activate():
         with pytest.raises(AssertionError):
             c.register_package("payout_skill", PKG, SRC, "security",
-                               "1.0:" + SHA_10 + ",1.1:" + SHA_11)
+                               "1.0:" + SHA_10 + ",1.1:" + SHA_11, "", "")
 
 
 def test_only_the_maintainer_can_add_a_version():
     vm, c = _boot()
     serve(vm, file_url(PKG, SHA_SPARE), "def extra():\n    return 1\n")
+    serve(vm, tag_url(PKG, "1.3"), "def extra():\n    return 1\n")
     with vm.activate():
         register_package(c)
         set_sender(vm, BYSTANDER)
@@ -436,5 +439,6 @@ def test_contract_exposes_no_status_setter():
                     writes.add(node.name)
     assert writes == {
         "register_package", "add_version", "register_dependent", "repin_dependent",
-        "report_advisory", "assess_dependent", "escalate",
+        "report_advisory", "report_followup", "propagate", "escalate_propagation",
+        "assess_dependent", "escalate",
     }

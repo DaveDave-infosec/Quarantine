@@ -132,13 +132,13 @@ function isNetwork(e: any): boolean {
 
 // Studio shares a small pool of execution slots. Keep at most three reads in
 // flight; a finished read hands its slot straight to the next one waiting.
-const MAX_READS = 3;
+const MAX_READS = 2;
 let activeReads = 0;
 const readQueue: (() => void)[] = [];
 
 // Studio throttles bursts from one browser, and its throttle response reaches
 // the browser as a bare "Failed to fetch". Space read starts out as well.
-const READ_SPACING_MS = 250;
+const READ_SPACING_MS = 400;
 let lastReadStart = 0;
 
 async function acquireRead(): Promise<void> {
@@ -234,7 +234,9 @@ export async function readContract(params: {
     }
     await sleep(Math.min(12000, 1500 * 2 ** attempt) + Math.floor(Math.random() * 500));
   }
-  const detail = String(lastErr?.shortMessage || lastErr?.message || lastErr || "").slice(0, 200);
+  const detail = String(
+    [lastErr?.shortMessage, lastErr?.details].filter(Boolean).join(" ") || lastErr?.message || lastErr || "",
+  ).slice(0, 240);
   throw new Error(`The network is busy right now. Please try that again in a moment. (${params.functionName}: ${detail})`);
 }
 

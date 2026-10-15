@@ -7,7 +7,9 @@ import {
   REPO_URL,
   DEMO_REPO_URL,
   DEMO_FORK_URL,
+  DEMO_WRAPPER_URL,
   BYSTANDER_RECEIPT_TX,
+  WITHDRAW_RECEIPT_TX,
   txUrl,
 } from "../lib/contracts";
 
@@ -23,7 +25,7 @@ export default function Footer() {
           <p>Validators read the code. The host obeys.</p>
         </div>
         <div>
-          <h4>Contracts</h4>
+          <h4>Contracts (V2)</h4>
           <dl className="addr">
             <dt>Registry</dt>
             <dd className="mono">{REGISTRY_ADDRESS}</dd>
@@ -42,8 +44,13 @@ export default function Footer() {
               </a>
             </li>
             <li>
+              <a href={txUrl(WITHDRAW_RECEIPT_TX)} target="_blank" rel="noreferrer">
+                Bystander withdrawal receipt
+              </a>
+            </li>
+            <li>
               <a href={REPO_URL} target="_blank" rel="noreferrer">
-                Source and 48 tests
+                Source and 70 tests
               </a>
             </li>
             <li>
@@ -54,6 +61,11 @@ export default function Footer() {
             <li>
               <a href={DEMO_FORK_URL} target="_blank" rel="noreferrer">
                 Demo fork repo
+              </a>
+            </li>
+            <li>
+              <a href={DEMO_WRAPPER_URL} target="_blank" rel="noreferrer">
+                Demo wrapper repo
               </a>
             </li>
           </ul>

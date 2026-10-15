@@ -738,3 +738,13 @@ button:focus-visible {
     gap: 28px;
   }
 }
+
+.v-uncertain .cm-ver-dot {
+  fill: var(--s-conflict);
+  stroke: var(--s-conflict);
+}
+
+.v-uncertain .cm-ver-label {
+  fill: var(--s-conflict);
+  font-weight: 700;
+}

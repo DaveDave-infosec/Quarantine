@@ -41,7 +41,11 @@ export default function DependentCard({ view, letter, pkg, advisoryId, pinLabel,
   const isOwner = !!address && address === dep.owner;
   const isOperator = !!address && address === operator;
   const canEscalate =
-    exists && !stale && a?.state === "EVIDENCE_CONFLICT" && a?.conflict_reason !== "too_large";
+    exists &&
+    !stale &&
+    a?.state === "EVIDENCE_CONFLICT" &&
+    a?.conflict_reason !== "too_large" &&
+    a?.conflict_reason !== "inherited_unclear";
 
   const [why, setWhy] = useState(false);
   const [tool, setTool] = useState<"" | "repin" | "execute">("");
@@ -139,6 +143,9 @@ export default function DependentCard({ view, letter, pkg, advisoryId, pinLabel,
         )}
         {stale && (
           <p className="dep-stale">Re-pinned since its last assessment. Blocked until someone reassesses it.</p>
+        )}
+        {exists && !stale && a?.conflict_reason === "inherited_unclear" && (
+          <p className="dep-via">Inherited uncertainty. Escalate this wrapper version in the Inherited exposure panel.</p>
         )}
         {!exists && advisoryId && (
           <p className="dep-via">Not assessed against advisory {advisoryId} yet. Anyone can assess it.</p>

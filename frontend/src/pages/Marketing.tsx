@@ -5,20 +5,35 @@ import Shell from "../components/Shell";
 import ContainmentMap, { StateLegend, STATE_COLOR, STATE_LABEL } from "../components/ContainmentMap";
 import { useDemoScript } from "../components/useDemoScript";
 import type { State } from "../lib/contracts";
-import { BYSTANDER_RECEIPT_TX, BYSTANDER_WALLET, REGISTRY_ADDRESS, REPO_URL, txUrl } from "../lib/contracts";
+import {
+  BYSTANDER_RECEIPT_TX,
+  WITHDRAW_RECEIPT_TX,
+  BYSTANDER_WALLET,
+  REGISTRY_ADDRESS,
+  REPO_URL,
+  txUrl,
+} from "../lib/contracts";
 import { short } from "../lib/format";
 import "../marketing.css";
 
-// Real output from the live run: assessment of Deployment C against advisory 1.
+// Real output from the V1 live run: Deployment C against advisory 1.
 const C_REASONING =
   "The build_transfers function in the deployment file calculates a reserve amount using OPS_RESERVE_BPS (150) and subtracts it from the total payout. It then appends a transfer of this reserve amount to OPS_RESERVE_WALLET, which is a hardcoded address equivalent to the one in the affected version.";
 const C_MINORITY =
   "One could argue that the deployment file uses different function and variable names such as build_transfers and OPS_RESERVE_WALLET, but the underlying logic of diverting 150 basis points to a hardcoded address remains functionally identical to the vulnerable pattern.";
 
+// Real output from the V2 live run: wrapper batch_payout 2.0 and 2.1, both vendoring payout_skill 1.1.
+const W20_REASONING =
+  "The wrapper imports and calls plan_payout from the vendored payout_skill 1.1. The vendored code contains the vulnerable pattern where RELAY_FEE_BPS (150) is skimmed and sent to RELAY_ADDRESS. The wrapper's plan_batch function simply iterates over batches and returns the results of plan_payout without any filtering or validation.";
+const W21_REASONING =
+  "The wrapper's declared_only function filters out any transfers to undeclared recipients, which removes the relay fee transfer to the hardcoded RELAY_ADDRESS. The wrapper ensures only declared recipients receive funds and adjusts the first recipient's amount to account for any withheld relay fees, effectively neutralizing the vulnerability.";
+const W21_MINORITY =
+  "One might argue that because the vendored plan_payout still calculates and temporarily includes the relay fee, the flaw exists internally, even though it is removed before returning results.";
+
 const CLAIMS = [
   { who: "The maintainer", says: "Only 1.1 is affected." },
   { who: "A fork", says: "We cherry-picked the fix." },
-  { who: "A deployment", says: "We are on a patched commit." },
+  { who: "A wrapper", says: "We vendor it, but we filter the output." },
 ];
 
 const STATES: { s: State; meaning: string; host: string }[] = [
@@ -48,11 +63,15 @@ const CORE_FILL: Record<State, string> = {
 const TRUST = [
   {
     title: "Evidence sources are locked",
-    body: "The repo, the skill file path and the advisory folder are fixed at registration. Every URL is commit-pinned, so the bytes cannot change under a verdict, and a reporter cannot point the contract anywhere else.",
+    body: "The repo, the skill file path, the vendor path and the advisory folder are fixed at registration. Every URL is commit-pinned, so the bytes cannot change under a verdict.",
   },
   {
-    title: "Re-pinning never unblocks",
-    body: "A re-pin changes no state. Every existing assessment goes stale, and a stale assessment blocks until someone reassesses the new pin. Only a fresh verdict restores.",
+    title: "Labels are tag-verified",
+    body: "Every version is fetched at its commit and at its git tag of the same name, and the bytes must match. A maintainer cannot quietly call any commit 1.2.",
+  },
+  {
+    title: "Nothing unblocks quietly",
+    body: "A re-pin marks every assessment stale and blocks until reassessed. An amendment keeps the old blocks until its successor has assessed each deployment.",
   },
   {
     title: "No status setter exists",
@@ -140,6 +159,45 @@ function Ring({ state }: { state: State }) {
   );
 }
 
+function Receipt({ tx, kicker, title, body, call, result }: {
+  tx: string;
+  kicker: string;
+  title: string;
+  body: string;
+  call: string;
+  result: string;
+}) {
+  return (
+    <a className="receipt" href={txUrl(tx)} target="_blank" rel="noreferrer">
+      <div>
+        <span className="mono receipt-k">{kicker}</span>
+        <h3>{title}</h3>
+        <p>{body}</p>
+      </div>
+      <dl className="receipt-r mono">
+        <div>
+          <dt>From</dt>
+          <dd>{short(BYSTANDER_WALLET)}</dd>
+        </div>
+        <div>
+          <dt>Call</dt>
+          <dd>{call}</dd>
+        </div>
+        <div>
+          <dt>Result</dt>
+          <dd className="ok">{result}</dd>
+        </div>
+        <div>
+          <dt>Tx</dt>
+          <dd>
+            {short(tx)} {"↗"}
+          </dd>
+        </div>
+      </dl>
+    </a>
+  );
+}
+
 export default function Marketing() {
   const demo = useDemoScript();
 
@@ -158,8 +216,8 @@ export default function Marketing() {
               <span className="hero-accent">Who is exposed?</span>
             </h1>
             <p className="hero-sub">
-              When an agent skill is compromised, Quarantine decides which deployments are materially exposed, and the
-              capability host refuses to run them until a verified fix is pinned.{" "}
+              When an agent skill is compromised, Quarantine decides which deployments are materially exposed, including
+              wrappers that vendor it, and the capability host refuses to run them until a verified fix is pinned.{" "}
               <strong>Validators read the code. The host obeys.</strong>
             </p>
             <div className="hero-cta">
@@ -167,7 +225,7 @@ export default function Marketing() {
                 Open console
               </Link>
             </div>
-            <p className="hero-meta mono">Live on GenLayer Studio · 48 tests · no operator anywhere</p>
+            <p className="hero-meta mono">Live on GenLayer Studio · 70 tests · no operator anywhere</p>
           </div>
 
           <div className="map-card">
@@ -198,7 +256,7 @@ export default function Marketing() {
         <div className="container stats-grid">
           <div className="stat-cell">
             <span className="stat-num">
-              <CountUp to={48} />
+              <CountUp to={70} />
             </span>
             <span className="stat-lab">tests against the real contract code</span>
           </div>
@@ -210,9 +268,9 @@ export default function Marketing() {
           </div>
           <div className="stat-cell">
             <span className="stat-num">
-              <CountUp to={8} />
+              <CountUp to={2} />
             </span>
-            <span className="stat-lab">on-chain steps in the live proof</span>
+            <span className="stat-lab">on-chain receipts from a wallet with no role</span>
           </div>
           <div className="stat-cell">
             <span className="stat-num">
@@ -259,26 +317,27 @@ export default function Marketing() {
               <h3>Exact pin? Decided in code.</h3>
               <p>
                 When a deployment's pinned bytes match a registered version, the contract compares sha256 hashes and applies
-                the advisory directly. No model call, no consensus spent.
+                the advisory directly. Which upstream version a wrapper vendors is decided the same way. No model call, no
+                consensus spent.
               </p>
               <p className="split-proof mono">Proven in tests: the model is never called on this path</p>
             </article>
             <article className="split-card">
               <span className="badge-lg">{"•••"}</span>
-              <h3>Fork or patch claim? Decided by validators.</h3>
+              <h3>Anything code cannot settle? Validators.</h3>
               <p>
-                When the bytes match nothing registered, validators read the deployment's executable code against the
-                advisory's vulnerable pattern. Comments, docstrings and version strings carry no weight. Renaming a flaw
-                does not hide it.
+                Prose advisories, divergent forks, claimed patches, wrappers around a flawed dependency, and follow-ups that
+                may withdraw or amend an earlier advisory. Validators judge executable code and plain meaning. Comments,
+                docstrings and version strings carry no weight.
               </p>
-              <p className="split-proof mono">Proven live: a renamed skim was caught, a real fix was cleared</p>
+              <p className="split-proof mono">Proven live: renamed skims caught, real fixes and neutralizing wrappers cleared</p>
             </article>
           </Reveal>
           <Reveal>
-            <ul className="three-q">
+            <ul className="three-q five-q">
               <li>
                 <span className="mono">01</span>
-                What a prose advisory actually says is affected and patched
+                What a prose advisory says is affected and patched
               </li>
               <li>
                 <span className="mono">02</span>
@@ -288,10 +347,18 @@ export default function Marketing() {
                 <span className="mono">03</span>
                 Whether a claimed patch is real in code
               </li>
+              <li>
+                <span className="mono">04</span>
+                Whether a wrapper exposes or neutralizes a vendored flaw
+              </li>
+              <li>
+                <span className="mono">05</span>
+                Whether a new advisory withdraws or amends an old one
+              </li>
             </ul>
             <p className="mk-note">
-              Those are the three questions only consensus answers. Where a structured feed exists and every deployment pins
-              a registered version, a plain contract would do. Quarantine says so.
+              Those are the only questions consensus answers. Where a structured feed exists and every deployment pins a
+              registered version, a plain contract would do. Quarantine says so.
             </p>
           </Reveal>
         </div>
@@ -306,8 +373,8 @@ export default function Marketing() {
             </p>
             <h2 className="mk-h2">Every verdict keeps the strongest case against it.</h2>
             <p className="mk-lede">
-              When validators decide a fork, the registry stores their reasoning and the best argument for the other answer,
-              side by side, on-chain. Nothing is flattened into a bare yes or no.
+              When validators decide, the registry stores their reasoning and the best argument for the other answer, side by
+              side, on-chain. Nothing is flattened into a bare yes or no.
             </p>
           </Reveal>
           <Reveal className="verdict">
@@ -326,20 +393,57 @@ export default function Marketing() {
               </div>
             </div>
             <div className="verdict-foot">
-              Real output from the live run, stored in the registry at{" "}
-              <span className="mono">{short(REGISTRY_ADDRESS)}</span>. <Link to="/console">Read every assessment in the console</Link>.
+              Real output from the V1 live run, stored on-chain. <Link to="/console">Read every assessment in the console</Link>.
             </div>
-          </Reveal>
-          <Reveal>
-            <p className="mk-note">
-              When the answer is genuinely too close to call, the deployment is held as Evidence conflict instead of being
-              killed. Anyone can escalate it to a forcing pass that must commit, or honestly return unresolved.
-            </p>
           </Reveal>
         </div>
       </section>
 
       <section className="mk-section mk-band">
+        <div className="container">
+          <Reveal>
+            <p className="eyebrow">
+              <span className="eyebrow-dot" />
+              Inherited exposure
+            </p>
+            <h2 className="mk-h2">Same vendored bytes. Opposite verdicts.</h2>
+            <p className="mk-lede">
+              A wrapper skill vendors a copy of the compromised payout_skill 1.1. Two releases carry the identical vendored
+              file. Code can prove that much, and nothing more. Whether callers are still exposed depends on what the
+              wrapper's own code does with it, so validators read both.
+            </p>
+          </Reveal>
+          <Reveal className="pair">
+            <article className="pair-card exposed">
+              <div className="pair-head mono">
+                <span>batch_payout 2.0 · vendors 1.1</span>
+                <span className="pair-tag">EXPOSED</span>
+              </div>
+              <p>{W20_REASONING}</p>
+            </article>
+            <article className="pair-card neutral">
+              <div className="pair-head mono">
+                <span>batch_payout 2.1 · vendors 1.1</span>
+                <span className="pair-tag">NEUTRALIZED</span>
+              </div>
+              <p>{W21_REASONING}</p>
+              <div className="pair-minor">
+                <span className="mono verdict-k">MINORITY NOTE</span>
+                <p>{W21_MINORITY}</p>
+              </div>
+            </article>
+          </Reveal>
+          <Reveal>
+            <p className="mk-note">
+              Each release is judged once. Every deployment of the wrapper then resolves by hash: on chain, the host refused a
+              payout through 2.0 and ran one through 2.1. Real output from the V2 live run, stored in the registry at{" "}
+              <span className="mono">{short(REGISTRY_ADDRESS)}</span>.
+            </p>
+          </Reveal>
+        </div>
+      </section>
+
+      <section className="mk-section">
         <div className="container">
           <Reveal>
             <p className="eyebrow">The five states</p>
@@ -358,7 +462,7 @@ export default function Marketing() {
         </div>
       </section>
 
-      <section className="mk-section">
+      <section className="mk-section mk-band">
         <div className="container">
           <Reveal>
             <p className="eyebrow">Trust model</p>
@@ -372,35 +476,23 @@ export default function Marketing() {
               </article>
             ))}
           </Reveal>
-          <Reveal>
-            <a className="receipt" href={txUrl(BYSTANDER_RECEIPT_TX)} target="_blank" rel="noreferrer">
-              <div>
-                <span className="mono receipt-k">PROOF · ON-CHAIN RECEIPT</span>
-                <h3>A wallet with no role restored a deployment.</h3>
-                <p>
-                  Wallet {short(BYSTANDER_WALLET)} is not the maintainer, not an owner, not the issuer and not the deployer.
-                  It reassessed Deployment A after a verified re-pin, and the registry restored it.
-                </p>
-              </div>
-              <dl className="receipt-r mono">
-                <div>
-                  <dt>From</dt>
-                  <dd>{short(BYSTANDER_WALLET)}</dd>
-                </div>
-                <div>
-                  <dt>Call</dt>
-                  <dd>assess_dependent(1, 1)</dd>
-                </div>
-                <div>
-                  <dt>Result</dt>
-                  <dd className="ok">RESTORED</dd>
-                </div>
-                <div>
-                  <dt>Tx</dt>
-                  <dd>{short(BYSTANDER_RECEIPT_TX)} {"↗"}</dd>
-                </div>
-              </dl>
-            </a>
+          <Reveal className="receipts">
+            <Receipt
+              tx={BYSTANDER_RECEIPT_TX}
+              kicker="V1 PROOF · ON-CHAIN RECEIPT"
+              title="A wallet with no role restored a deployment."
+              body="It is not the maintainer, not an owner, not the issuer and not the deployer. It reassessed a deployment after a verified re-pin, and the registry restored it."
+              call="assess_dependent(1, 1)"
+              result="RESTORED"
+            />
+            <Receipt
+              tx={WITHDRAW_RECEIPT_TX}
+              kicker="V2 PROOF · ON-CHAIN RECEIPT"
+              title="The same wallet released a false positive."
+              body="A mistaken advisory wrongly blocked a clean deployment. That wallet filed the retraction, validators judged it a full withdrawal, and containment lifted with no operator involved."
+              call="report_followup(5, ...)"
+              result="WITHDRAWN"
+            />
           </Reveal>
         </div>
       </section>
@@ -422,7 +514,7 @@ export default function Marketing() {
           </div>
           <p className="mono cta-meta">
             <a href={REPO_URL} target="_blank" rel="noreferrer">
-              Source, 48 tests and TESTING.md on GitHub
+              Source, 70 tests and TESTING.md on GitHub
             </a>
           </p>
         </div>

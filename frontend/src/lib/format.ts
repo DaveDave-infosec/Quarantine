@@ -24,3 +24,11 @@ export function rawToBlob(url: string): string {
   const m = url.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/(.+)$/i);
   return m ? `https://github.com/${m[1]}/${m[2]}/blob/${m[3]}` : url;
 }
+
+export function statusClass(status: string): string {
+  if (status === "OPEN") return "open";
+  if (status === "PENDING") return "pending";
+  if (status === "CLEAR" || status === "WITHDRAWN" || status === "WITHDRAWAL") return "cleared";
+  if (status === "SUPERSEDED") return "superseded";
+  return "rejected";
+}

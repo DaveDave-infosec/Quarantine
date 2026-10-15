@@ -15,7 +15,7 @@ export interface MapNode {
 
 export interface MapVersion {
   label: string;
-  status: "clean" | "affected" | "patched";
+  status: "clean" | "affected" | "patched" | "uncertain";
 }
 
 export const STATE_COLOR: Record<State, string> = {

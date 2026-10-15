@@ -6,18 +6,19 @@ import type { MapNode, MapVersion } from "../components/ContainmentMap";
 import { useRegistry } from "../lib/useRegistry";
 import { useTx } from "../lib/useTx";
 import { useWallet } from "../lib/useWallet";
-import { getCounts, getPackage } from "../lib/contracts";
+import { getCounts, getPackage, DEFAULT_PACKAGE } from "../lib/contracts";
 import type { Dependent } from "../lib/contracts";
 import DependentCard from "../components/console/DependentCard";
 import AdvisoryPanel from "../components/console/AdvisoryPanel";
 import { RegisterPackageForm, RegisterDependentForm } from "../components/console/Forms";
 import RunnerPanel from "../components/console/RunnerPanel";
+import PropagationPanel from "../components/console/PropagationPanel";
 import TxBar from "../components/console/TxBar";
 import "../console.css";
 
 export default function ConsolePage() {
   const [params, setParams] = useSearchParams();
-  const selected = params.get("pkg") ?? "1";
+  const selected = params.get("pkg") ?? DEFAULT_PACKAGE;
   const { address } = useWallet();
   const { summaries, view, runner, runnerError, loading, error, reload, reloadRunner } = useRegistry(
     selected,
@@ -48,9 +49,11 @@ export default function ConsolePage() {
       label: v.label,
       status: activeAdvisory?.affected_labels.includes(v.label)
         ? "affected"
-        : activeAdvisory?.patched_labels.includes(v.label)
-          ? "patched"
-          : "clean",
+        : activeAdvisory?.uncertain_labels?.includes(v.label)
+          ? "uncertain"
+          : activeAdvisory?.patched_labels.includes(v.label)
+            ? "patched"
+            : "clean",
     }),
   );
 
@@ -120,6 +123,7 @@ export default function ConsolePage() {
                     <span className="pkg-meta mono">
                       #{s.id} · {s.versions} versions · {s.dependents} deployments
                     </span>
+                    {s.upstream && <span className="pkg-vendor mono">vendors package #{s.upstream}</span>}
                     {s.open > 0 && <span className="pkg-open mono">{s.open} open advisory</span>}
                   </button>
                 </li>
@@ -133,7 +137,11 @@ export default function ConsolePage() {
             {!view ? (
               <div className="map-card">
                 <p className="map-status">
-                  {loading ? "Reading the registry from chain…" : "No packages registered yet."}
+                  {loading
+                    ? "Reading the registry from chain…"
+                    : error
+                      ? "Could not load this package from chain. Press Refresh to try again."
+                      : "No packages registered yet."}
                 </p>
               </div>
             ) : (
@@ -164,6 +172,8 @@ export default function ConsolePage() {
                   busy={busy}
                   run={run}
                 />
+
+                {view.pkg.upstream && <PropagationPanel view={view} address={address} busy={busy} run={run} />}
 
                 <section className="panel">
                   <div className="panel-head">

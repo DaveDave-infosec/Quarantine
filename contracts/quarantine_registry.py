@@ -2,12 +2,13 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 """
-Quarantine registry.
+Quarantine registry, V2.
 
 Decides which registered deployments are materially exposed when an agent
-skill is compromised. Exact pins are decided in code by file hash. Prose
-advisories, divergent forks and patch claims are decided by validator
-consensus. Nobody can set a status directly.
+skill is compromised, including deployments of wrapper skills that vendor a
+compromised upstream. Exact pins are decided in code by hash. Prose
+advisories, divergent forks, follow-up advisories and wrapper propagation are
+decided by validator consensus. Nobody can set a status directly.
 """
 
 from genlayer import *
@@ -16,16 +17,18 @@ import hashlib
 import json
 
 MAX_FILE_CHARS = 12000
-MAX_VERSIONS = 16
+MAX_VERSIONS = 6
 MAX_DEPENDENTS = 8
-MAX_OPEN_ADVISORIES = 16
+MAX_ADVISORIES = 24
 RAW_HOST = "https://raw.githubusercontent.com/"
 HEX_CHARS = "0123456789abcdef"
 NAME_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-_."
 PATH_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./"
+VENDOR_SEP = "\n\n=== VENDORED UPSTREAM FILE ===\n"
 
 BLOCKING_STATES = ("QUARANTINED", "PATCH_REQUIRED")
 CONTAINED_STATES = ("QUARANTINED", "PATCH_REQUIRED", "EVIDENCE_CONFLICT")
+IN_FORCE = ("OPEN", "SUPERSEDED")
 
 EXTRACT_TASK = (
     "You read a security advisory and extract facts about one named package. "
@@ -53,11 +56,38 @@ EXTRACT_CRITERIA = (
     "vulnerable_pattern faithfully describes the flaw the advisory states."
 )
 
+FOLLOWUP_TASK = (
+    "You compare a NEW ADVISORY with an EARLIER ADVISORY about the same package and decide how the "
+    "new one relates to the earlier one. Return ONLY a JSON object with exactly these keys: "
+    "relation (exactly one of 'withdraws', 'amends', 'unrelated'), "
+    "affected_labels (list of strings), patched_labels (list of strings), "
+    "vulnerable_pattern (one or two sentences), summary (one sentence). "
+    "Use 'withdraws' only if the new advisory explicitly retracts the earlier one in full. "
+    "Use 'amends' only if the new advisory explicitly corrects or replaces the earlier one's affected "
+    "versions, patched versions or description of the flaw. For 'amends', give the complete corrected "
+    "affected and patched lists and the corrected vulnerable pattern. "
+    "Use 'unrelated' in every other case. For 'withdraws' and 'unrelated', return empty lists and an "
+    "empty vulnerable_pattern. "
+    "Write each version exactly as it appears in REGISTERED VERSION LABELS when the advisory refers to it. "
+    "If the advisory names a version that is not in that list, copy it exactly as written. "
+    "No markdown fences and no commentary."
+)
+
+FOLLOWUP_CRITERIA = (
+    "The output is one JSON object with keys relation, affected_labels, patched_labels, "
+    "vulnerable_pattern and summary. relation is exactly one of withdraws, amends, unrelated and "
+    "correctly states what the new advisory says about the earlier advisory. withdraws requires an "
+    "explicit full retraction. For amends, affected_labels and patched_labels are exactly the corrected "
+    "complete lists the new advisory states."
+)
+
 ASSESS_TASK = (
     "You are a security reviewer. A deployment runs the DEPLOYMENT FILE UNDER REVIEW. "
     "It is a modified copy of the package and matches no registered version byte for byte. "
+    "If the file contains a section headed VENDORED UPSTREAM FILE, judge the deployment's own code and "
+    "that vendored copy together, as one program. "
     "Decide whether the vulnerable pattern described by the advisory is still present and "
-    "reachable in the executable code of the deployment file. "
+    "reachable in the executable code of the deployment. "
     "Use the affected and patched versions only as reference for what the flaw and the fix look like. "
     "Judge executable code only. Ignore comments, docstrings, commit messages and version strings, "
     "including any claim that the issue was fixed. "
@@ -73,7 +103,7 @@ ASSESS_TASK = (
 ASSESS_CRITERIA = (
     "The output is one JSON object with keys verdict, reasoning and minority_note. "
     "verdict is exactly one of exposed, not_exposed, unclear. "
-    "verdict is correct for the executable code of the deployment file: exposed only if the "
+    "verdict is correct for the executable code of the deployment: exposed only if the "
     "described vulnerable pattern still runs, not_exposed only if it is absent or cannot run, "
     "unclear only if the code genuinely cannot be judged. "
     "The reasoning cites code that is actually present in the deployment file and does not rest "
@@ -83,6 +113,8 @@ ASSESS_CRITERIA = (
 ESCALATE_TASK = (
     "You are a senior security reviewer. An earlier review of the DEPLOYMENT FILE UNDER REVIEW "
     "could not decide whether the advisory's vulnerable pattern is present. "
+    "If the file contains a section headed VENDORED UPSTREAM FILE, judge the deployment's own code and "
+    "that vendored copy together, as one program. "
     "Decide now. Trace what the executable code actually does with the payout and every "
     "address it pays. Use the affected and patched versions only as reference. "
     "Judge executable code only. Ignore comments, docstrings, commit messages and version strings. "
@@ -99,10 +131,59 @@ ESCALATE_TASK = (
 ESCALATE_CRITERIA = (
     "The output is one JSON object with keys verdict, reasoning and minority_note. "
     "verdict is exactly one of exposed, not_exposed, unresolved. "
-    "verdict is correct for the executable code of the deployment file, and unresolved is used "
+    "verdict is correct for the executable code of the deployment, and unresolved is used "
     "only if the code genuinely supports neither verdict more than the other. "
     "The reasoning cites code that is actually present in the deployment file and does not rest "
     "on comments, docstrings or version strings."
+)
+
+PROPAGATE_TASK = (
+    "You are a security reviewer. A WRAPPER skill vendors a copy of an upstream package that an "
+    "advisory says is vulnerable. The WRAPPER VERSION UNDER REVIEW shows the wrapper's own code, then a "
+    "section headed VENDORED UPSTREAM FILE with the copy it carries. "
+    "Decide whether callers of the wrapper are still exposed to the vulnerable pattern, or whether the "
+    "wrapper neutralizes it. Use the upstream affected and patched versions only as reference. "
+    "Judge executable code only. Ignore comments, docstrings and version strings. "
+    "'exposed' means a caller of the wrapper can still trigger the flaw or receive its effects. "
+    "'neutralized' means the wrapper's own code removes or blocks every effect of the flaw before any "
+    "result leaves the wrapper. "
+    "Return ONLY a JSON object with keys: "
+    "verdict (exactly one of 'exposed', 'neutralized', 'unclear'), "
+    "reasoning (two to four sentences pointing at specific wrapper code), "
+    "minority_note (one or two sentences giving the strongest case for the opposite verdict). "
+    "Use unclear only if the code genuinely cannot be judged from what is shown. "
+    "No markdown fences and no commentary."
+)
+
+PROPAGATE_CRITERIA = (
+    "The output is one JSON object with keys verdict, reasoning and minority_note. "
+    "verdict is exactly one of exposed, neutralized, unclear. "
+    "verdict is correct for the executable code of the wrapper and its vendored copy: exposed only if "
+    "a caller can still trigger or receive the flaw, neutralized only if the wrapper's code removes "
+    "every effect of the flaw, unclear only if the code genuinely cannot be judged. "
+    "The reasoning cites code that is actually present in the wrapper version."
+)
+
+PROPAGATE_ESCALATE_TASK = (
+    "You are a senior security reviewer. An earlier review could not decide whether a WRAPPER skill "
+    "neutralizes a vulnerable upstream it vendors. The WRAPPER VERSION UNDER REVIEW shows the wrapper's "
+    "own code, then a section headed VENDORED UPSTREAM FILE. "
+    "Decide now. Trace every value the wrapper returns and every address it pays. "
+    "Judge executable code only. Ignore comments, docstrings and version strings. "
+    "You must commit to exposed or neutralized whenever the code supports one more than the other. "
+    "Return ONLY a JSON object with keys: "
+    "verdict (exactly one of 'exposed', 'neutralized', 'unresolved'), "
+    "reasoning (two to four sentences pointing at specific wrapper code), "
+    "minority_note (one or two sentences giving the strongest case for the opposite verdict). "
+    "Use unresolved only if the code is genuinely ambiguous even after careful tracing. "
+    "No markdown fences and no commentary."
+)
+
+PROPAGATE_ESCALATE_CRITERIA = (
+    "The output is one JSON object with keys verdict, reasoning and minority_note. "
+    "verdict is exactly one of exposed, neutralized, unresolved, and unresolved is used only if the "
+    "code genuinely supports neither verdict more than the other. "
+    "The reasoning cites code that is actually present in the wrapper version."
 )
 
 
@@ -120,6 +201,10 @@ def _append(csv: str, item: str) -> str:
     if csv == "":
         return item
     return csv + "," + item
+
+
+def _remove(csv: str, item: str) -> str:
+    return ",".join([x for x in _split(csv) if x != item])
 
 
 def _unique(items: list) -> list:
@@ -158,7 +243,7 @@ def _check_path(path: str, is_dir: bool) -> str:
     assert "//" not in p, "path must not contain empty segments"
     assert all(ch in PATH_CHARS for ch in p), "path has an invalid character"
     if not is_dir:
-        assert not p.endswith("/"), "source path must point to a file"
+        assert not p.endswith("/"), "file path must point to a file"
     return p
 
 
@@ -217,22 +302,57 @@ def _str_list(value) -> list:
     return [str(x).strip().replace(",", " ")[:32] for x in value]
 
 
-def _fetch_text(url: str) -> str:
-    target = url
+def _verdict(data: dict, allowed: tuple, fallback: str) -> str:
+    v = str(data.get("verdict", "")).strip().lower()
+    return v if v in allowed else fallback
+
+
+def _label_status(labels: list, affected: list, patched: list) -> str:
+    if len(affected) == 0:
+        return "REJECTED_NO_AFFECTED"
+    if any(label not in labels for label in affected + patched):
+        return "REJECTED_UNMAPPED"
+    if any(label in patched for label in affected):
+        return "REJECTED_INCONSISTENT"
+    return "OPEN"
+
+
+def _version_urls(prefix: str, ref: str, src: str, vendor: str) -> list:
+    urls = [prefix + ref + "/" + src]
+    if vendor != "":
+        urls.append(prefix + ref + "/" + vendor)
+    return urls
+
+
+def _combine(bodies: list) -> str:
+    if len(bodies) == 1:
+        return bodies[0]
+    return bodies[0] + VENDOR_SEP + bodies[1]
+
+
+def _fetch_many(urls: list) -> list:
+    targets = list(urls)
 
     def fetch() -> str:
-        response = gl.nondet.web.get(target)
-        status = getattr(response, "status", None)
-        if status is None:
-            status = 200
-        body = response.body
-        text = body.decode("utf-8", errors="replace") if body is not None else ""
-        return json.dumps({"status": int(status), "body": text})
+        out = []
+        for target in targets:
+            response = gl.nondet.web.get(target)
+            status = getattr(response, "status", None)
+            if status is None:
+                status = 200
+            body = response.body
+            text = body.decode("utf-8", errors="replace") if body is not None else ""
+            out.append({"status": int(status), "body": text})
+        return json.dumps(out)
 
     raw = gl.eq_principle.strict_eq(fetch)
     data = json.loads(raw)
-    assert int(data["status"]) == 200, "evidence fetch failed with HTTP status " + str(data["status"])
-    return data["body"]
+    bodies = []
+    for i in range(len(data)):
+        status = int(data[i]["status"])
+        assert status == 200, "evidence fetch failed with HTTP status " + str(status) + " for " + targets[i]
+        bodies.append(data[i]["body"])
+    return bodies
 
 
 def _run_llm(input_text: str, task: str, criteria: str) -> dict:
@@ -250,14 +370,20 @@ class QuarantineRegistry(gl.Contract):
     pkg_prefix: TreeMap[str, str]
     pkg_source_path: TreeMap[str, str]
     pkg_adv_dir: TreeMap[str, str]
+    pkg_upstream: TreeMap[str, str]
+    pkg_vendor_path: TreeMap[str, str]
     pkg_labels: TreeMap[str, str]
     pkg_dep_ids: TreeMap[str, str]
     pkg_adv_ids: TreeMap[str, str]
     pkg_open_adv_ids: TreeMap[str, str]
+    pkg_derived: TreeMap[str, str]
 
     ver_sha: TreeMap[str, str]
     ver_hash: TreeMap[str, str]
+    ver_src_hash: TreeMap[str, str]
+    ver_vendored: TreeMap[str, str]
     ver_by_hash: TreeMap[str, str]
+    src_by_hash: TreeMap[str, str]
 
     dep_count: u256
     dep_pkg: TreeMap[str, str]
@@ -271,13 +397,24 @@ class QuarantineRegistry(gl.Contract):
     adv_pkg: TreeMap[str, str]
     adv_url: TreeMap[str, str]
     adv_status: TreeMap[str, str]
+    adv_kind: TreeMap[str, str]
+    adv_parent: TreeMap[str, str]
+    adv_successor: TreeMap[str, str]
     adv_reporter: TreeMap[str, str]
     adv_reported_at: TreeMap[str, str]
     adv_affected: TreeMap[str, str]
     adv_patched: TreeMap[str, str]
+    adv_uncertain: TreeMap[str, str]
     adv_pattern: TreeMap[str, str]
     adv_summary: TreeMap[str, str]
     adv_by_url: TreeMap[str, str]
+
+    prop_state: TreeMap[str, str]
+    prop_path: TreeMap[str, str]
+    prop_reason: TreeMap[str, str]
+    prop_minority: TreeMap[str, str]
+    prop_assessor: TreeMap[str, str]
+    prop_at: TreeMap[str, str]
 
     as_state: TreeMap[str, str]
     as_path: TreeMap[str, str]
@@ -303,41 +440,199 @@ class QuarantineRegistry(gl.Contract):
     def _sender(self) -> str:
         return gl.message.sender_address.as_hex.lower()
 
-    def _hash_version(self, prefix: str, sha: str, src: str) -> str:
-        text = _fetch_text(prefix + sha + "/" + src)
-        assert len(text) <= MAX_FILE_CHARS, "version file exceeds 12000 characters"
-        return _sha256(text)
+    def _verify_version(self, prefix: str, src: str, vendor: str, upstream: str,
+                        label: str, sha: str) -> list:
+        at_commit_urls = _version_urls(prefix, sha, src, vendor)
+        at_tag_urls = _version_urls(prefix, "refs/tags/" + label, src, vendor)
+        bodies = _fetch_many(at_commit_urls + at_tag_urls)
+        for body in bodies:
+            assert len(body) <= MAX_FILE_CHARS, "version file exceeds 12000 characters"
+        n = len(at_commit_urls)
+        at_commit = bodies[:n]
+        at_tag = bodies[n:]
+        combined_hash = _sha256(_combine(at_commit))
+        assert combined_hash == _sha256(_combine(at_tag)), (
+            "version " + label + " does not match the repo tag " + label
+        )
+        vendored = ""
+        if vendor != "":
+            key = upstream + "|" + _sha256(at_commit[1])
+            if key in self.src_by_hash:
+                vendored = self.src_by_hash[key]
+        return [combined_hash, _sha256(at_commit[0]), vendored]
 
-    def _store_version(self, pid: str, label: str, sha: str, file_hash: str):
-        hash_key = pid + "|" + file_hash
+    def _store_version(self, pid: str, label: str, sha: str, record: list):
+        hash_key = pid + "|" + record[0]
         assert hash_key not in self.ver_by_hash, "two versions cannot have identical bytes"
-        self.ver_sha[pid + "|" + label] = sha
-        self.ver_hash[pid + "|" + label] = file_hash
+        key = pid + "|" + label
+        self.ver_sha[key] = sha
+        self.ver_hash[key] = record[0]
+        self.ver_src_hash[key] = record[1]
+        self.ver_vendored[key] = record[2]
         self.ver_by_hash[hash_key] = label
+        src_key = pid + "|" + record[1]
+        if src_key not in self.src_by_hash:
+            self.src_by_hash[src_key] = label
         self.pkg_labels[pid] = _append(self.pkg_labels[pid], label)
 
-    def _judge(self, pid: str, aid: str, text: str, escalation: bool) -> dict:
+    def _version_text(self, pid: str, label: str) -> str:
+        bodies = _fetch_many(_version_urls(
+            self.pkg_prefix[pid], self.ver_sha[pid + "|" + label],
+            self.pkg_source_path[pid], self.pkg_vendor_path[pid],
+        ))
+        return _combine(bodies)
+
+    def _dependent_text(self, did: str) -> list:
+        pid = self.dep_pkg[did]
+        bodies = _fetch_many(_version_urls(
+            self.dep_prefix[did], self.dep_sha[did],
+            self.pkg_source_path[pid], self.pkg_vendor_path[pid],
+        ))
+        too_large = any(len(body) > MAX_FILE_CHARS for body in bodies)
+        text = _combine(bodies)
+        return [text, _sha256(text), too_large]
+
+    def _validate_adv_url(self, pid: str, url: str) -> str:
+        assert 0 < len(url) <= 400, "advisory url must be 1 to 400 characters"
+        assert not any(ch.isspace() for ch in url), "advisory url must not contain whitespace"
+        assert "?" not in url and "#" not in url, "advisory url must not contain a query or fragment"
         prefix = self.pkg_prefix[pid]
-        src = self.pkg_source_path[pid]
+        assert url.lower().startswith(prefix), "advisory must come from the package repo"
+        rest = url[len(prefix):]
+        commit = rest[:40]
+        assert _is_sha(commit), "advisory url must pin a 40 character lowercase commit sha"
+        assert rest[40:41] == "/", "advisory url must continue with / after the commit sha"
+        tail = rest[41:]
+        adv_dir = self.pkg_adv_dir[pid]
+        assert tail.startswith(adv_dir), "advisory must live in the package advisory directory"
+        filename = tail[len(adv_dir):]
+        assert len(filename) > 3 and filename.endswith(".md"), "advisory must be a .md file"
+        assert "/" not in filename, "advisory must sit directly in the advisory directory"
+        assert all(ch in PATH_CHARS for ch in filename), "advisory filename has an invalid character"
+        return prefix + rest
+
+    def _new_advisory(self, pid: str, url: str, status: str, at: str, affected: list,
+                      patched: list, uncertain: list, pattern: str, summary: str,
+                      kind: str, parent: str) -> str:
+        aid = str(int(self.adv_count) + 1)
+        self.adv_count = u256(int(self.adv_count) + 1)
+        self.adv_pkg[aid] = pid
+        self.adv_url[aid] = url
+        self.adv_status[aid] = status
+        self.adv_kind[aid] = kind
+        self.adv_parent[aid] = parent
+        self.adv_successor[aid] = ""
+        self.adv_reporter[aid] = self._sender()
+        self.adv_reported_at[aid] = at
+        self.adv_affected[aid] = ",".join(affected)
+        self.adv_patched[aid] = ",".join(patched)
+        self.adv_uncertain[aid] = ",".join(uncertain)
+        self.adv_pattern[aid] = pattern
+        self.adv_summary[aid] = summary
+        if url != "":
+            self.adv_by_url[url] = aid
+        self.pkg_adv_ids[pid] = _append(self.pkg_adv_ids[pid], aid)
+        if status == "OPEN":
+            self.pkg_open_adv_ids[pid] = _append(self.pkg_open_adv_ids[pid], aid)
+        return aid
+
+    def _parent_active(self, aid: str) -> bool:
+        cur = aid
+        for _ in range(8):
+            if self.adv_kind[cur] != "derived":
+                return True
+            parent = self.adv_parent[cur]
+            if self.adv_status[parent] not in IN_FORCE:
+                return False
+            cur = parent
+        return False
+
+    def _final_successor(self, aid: str) -> str:
+        cur = aid
+        for _ in range(16):
+            nxt = self.adv_successor[cur] if cur in self.adv_successor else ""
+            if nxt == "":
+                return cur
+            cur = nxt
+        return cur
+
+    def _reference_label(self, aid: str) -> str:
         affected = _split(self.adv_affected[aid])
+        if len(affected) > 0:
+            return affected[0]
+        return _split(self.adv_uncertain[aid])[0]
+
+    def _judge(self, pid: str, aid: str, text: str, escalation: bool) -> dict:
         patched = _split(self.adv_patched[aid])
-        pattern = self.adv_pattern[aid]
-        affected_label = affected[0]
-        affected_text = _fetch_text(prefix + self.ver_sha[pid + "|" + affected_label] + "/" + src)
+        ref = self._reference_label(aid)
+        ref_text = self._version_text(pid, ref)
         patched_block = "No patched version is registered for this advisory."
         if len(patched) > 0:
-            patched_label = patched[0]
-            patched_text = _fetch_text(prefix + self.ver_sha[pid + "|" + patched_label] + "/" + src)
-            patched_block = "=== PATCHED VERSION " + patched_label + " ===\n" + patched_text
+            patched_block = "=== PATCHED VERSION " + patched[0] + " ===\n" + self._version_text(pid, patched[0])
         input_text = (
-            "VULNERABLE PATTERN FROM THE ADVISORY:\n" + pattern + "\n\n"
-            + "=== AFFECTED VERSION " + affected_label + " ===\n" + affected_text + "\n\n"
+            "VULNERABLE PATTERN FROM THE ADVISORY:\n" + self.adv_pattern[aid] + "\n\n"
+            + "=== AFFECTED VERSION " + ref + " ===\n" + ref_text + "\n\n"
             + patched_block + "\n\n"
             + "=== DEPLOYMENT FILE UNDER REVIEW ===\n" + text
         )
         if escalation:
             return _run_llm(input_text, ESCALATE_TASK, ESCALATE_CRITERIA)
         return _run_llm(input_text, ASSESS_TASK, ASSESS_CRITERIA)
+
+    def _judge_propagation(self, aid: str, q: str, label: str, escalation: bool) -> dict:
+        up = self.adv_pkg[aid]
+        patched = _split(self.adv_patched[aid])
+        ref = self._reference_label(aid)
+        ref_text = self._version_text(up, ref)
+        patched_block = "No patched upstream version is registered for this advisory."
+        if len(patched) > 0:
+            patched_block = (
+                "=== PATCHED UPSTREAM VERSION " + patched[0] + " ===\n" + self._version_text(up, patched[0])
+            )
+        wrapper_text = self._version_text(q, label)
+        input_text = (
+            "VULNERABLE PATTERN FROM THE UPSTREAM ADVISORY:\n" + self.adv_pattern[aid] + "\n\n"
+            + "=== AFFECTED UPSTREAM VERSION " + ref + " ===\n" + ref_text + "\n\n"
+            + patched_block + "\n\n"
+            + "=== WRAPPER VERSION " + label + " UNDER REVIEW ===\n" + wrapper_text
+        )
+        if escalation:
+            return _run_llm(input_text, PROPAGATE_ESCALATE_TASK, PROPAGATE_ESCALATE_CRITERIA)
+        return _run_llm(input_text, PROPAGATE_TASK, PROPAGATE_CRITERIA)
+
+    def _refresh_derived(self, did: str) -> str:
+        q = self.adv_pkg[did]
+        affected = []
+        uncertain = []
+        patched = []
+        todo = False
+        for label in _split(self.pkg_labels[q]):
+            key = did + "|" + label
+            state = self.prop_state[key] if key in self.prop_state else "todo"
+            if state == "exposed":
+                affected.append(label)
+            elif state == "unclear":
+                uncertain.append(label)
+            elif state == "clean" or state == "neutralized":
+                patched.append(label)
+            else:
+                todo = True
+        self.adv_affected[did] = ",".join(affected)
+        self.adv_uncertain[did] = ",".join(uncertain)
+        self.adv_patched[did] = ",".join(patched)
+        previous = self.adv_status[did]
+        if todo:
+            status = "PENDING"
+        elif len(affected) > 0 or len(uncertain) > 0:
+            status = "OPEN"
+        else:
+            status = "CLEAR"
+        if status == "OPEN" and previous != "OPEN":
+            self.pkg_open_adv_ids[q] = _append(self.pkg_open_adv_ids[q], did)
+        if status != "OPEN" and previous == "OPEN":
+            self.pkg_open_adv_ids[q] = _remove(self.pkg_open_adv_ids[q], did)
+        self.adv_status[did] = status
+        return status
 
     def _record(self, key: str, dependent_id: str, state: str, path: str, label: str,
                 file_hash: str, reasoning: str, minority: str, conflict: str, at: str) -> str:
@@ -357,6 +652,16 @@ class QuarantineRegistry(gl.Contract):
             self.as_ever_contained[key] = "1"
         return state
 
+    def _state_capability(self, key: str, nonce: str, posture: str) -> str:
+        if self.as_pin_nonce[key] != nonce:
+            return "blocked"
+        state = self.as_state[key]
+        if state in BLOCKING_STATES:
+            return "blocked"
+        if state == "EVIDENCE_CONFLICT":
+            return "blocked" if posture == "strict" else "warn"
+        return "allowed"
+
     def _capability(self, dependent_id: str) -> str:
         if dependent_id not in self.dep_pkg:
             return "blocked"
@@ -364,38 +669,66 @@ class QuarantineRegistry(gl.Contract):
         posture = self.dep_posture[dependent_id]
         nonce = self.dep_pin_nonce[dependent_id]
         result = "allowed"
-        for aid in _split(self.pkg_open_adv_ids[pid]):
+        for aid in _split(self.pkg_adv_ids[pid]):
+            status = self.adv_status[aid]
             key = aid + "|" + dependent_id
-            if key not in self.as_state:
-                result = "warn"
+            if status == "PENDING":
+                if self._parent_active(aid):
+                    result = "warn"
                 continue
-            if self.as_pin_nonce[key] != nonce:
-                return "blocked"
-            state = self.as_state[key]
-            if state in BLOCKING_STATES:
-                return "blocked"
-            if state == "EVIDENCE_CONFLICT":
-                if posture == "strict":
+            if status == "OPEN":
+                if not self._parent_active(aid):
+                    continue
+                if key not in self.as_state:
+                    result = "warn"
+                    continue
+                verdict = self._state_capability(key, nonce, posture)
+                if verdict == "blocked":
                     return "blocked"
-                result = "warn"
+                if verdict == "warn":
+                    result = "warn"
+                continue
+            if status == "SUPERSEDED":
+                final = self._final_successor(aid)
+                if self.adv_status[final] != "OPEN":
+                    continue
+                final_key = final + "|" + dependent_id
+                if final_key in self.as_state and self.as_pin_nonce[final_key] == nonce:
+                    continue
+                if key not in self.as_state:
+                    continue
+                verdict = self._state_capability(key, nonce, posture)
+                if verdict == "blocked":
+                    return "blocked"
+                if verdict == "warn":
+                    result = "warn"
         return result
 
     # ---------- packages ----------
 
     @gl.public.write
-    def register_package(self, name: str, repo_prefix: str, source_path: str,
-                         advisory_dir: str, versions: str) -> str:
+    def register_package(self, name: str, repo_prefix: str, source_path: str, advisory_dir: str,
+                         versions: str, upstream_package_id: str, vendor_path: str) -> str:
         package_name = name.strip()
         assert 0 < len(package_name) <= 64, "package name must be 1 to 64 characters"
         prefix = _norm_prefix(repo_prefix)
         src = _check_path(source_path, False)
         adv_dir = _check_path(advisory_dir, True)
+        upstream = upstream_package_id.strip()
+        vendor = ""
+        if upstream != "":
+            assert upstream in self.pkg_name, "unknown upstream package"
+            vendor = _check_path(vendor_path, False)
+            assert vendor != src, "vendor path must differ from the skill file path"
+        else:
+            assert vendor_path.strip() == "", "a vendor path needs an upstream package"
         pairs = _parse_versions(versions)
-        assert 0 < len(pairs) <= MAX_VERSIONS, "between 1 and 16 versions are required"
+        assert 0 < len(pairs) <= MAX_VERSIONS, "between 1 and 6 versions are required"
 
-        hashes = []
+        records = []
         for pair in pairs:
-            hashes.append(self._hash_version(prefix, pair[1], src))
+            records.append(self._verify_version(prefix, src, vendor, upstream, pair[0], pair[1]))
+        hashes = [r[0] for r in records]
         assert len(_unique(hashes)) == len(hashes), "two versions cannot have identical bytes"
 
         pid = str(int(self.pkg_count) + 1)
@@ -405,12 +738,14 @@ class QuarantineRegistry(gl.Contract):
         self.pkg_prefix[pid] = prefix
         self.pkg_source_path[pid] = src
         self.pkg_adv_dir[pid] = adv_dir
+        self.pkg_upstream[pid] = upstream
+        self.pkg_vendor_path[pid] = vendor
         self.pkg_labels[pid] = ""
         self.pkg_dep_ids[pid] = ""
         self.pkg_adv_ids[pid] = ""
         self.pkg_open_adv_ids[pid] = ""
         for i in range(len(pairs)):
-            self._store_version(pid, pairs[i][0], pairs[i][1], hashes[i])
+            self._store_version(pid, pairs[i][0], pairs[i][1], records[i])
         return pid
 
     @gl.public.write
@@ -420,10 +755,13 @@ class QuarantineRegistry(gl.Contract):
         clean_label = _check_label(label)
         labels = _split(self.pkg_labels[package_id])
         assert clean_label not in labels, "version label already registered"
-        assert len(labels) < MAX_VERSIONS, "this package already has 16 versions"
+        assert len(labels) < MAX_VERSIONS, "this package already has 6 versions"
         clean_sha = _check_sha(sha)
-        file_hash = self._hash_version(self.pkg_prefix[package_id], clean_sha, self.pkg_source_path[package_id])
-        self._store_version(package_id, clean_label, clean_sha, file_hash)
+        record = self._verify_version(
+            self.pkg_prefix[package_id], self.pkg_source_path[package_id],
+            self.pkg_vendor_path[package_id], self.pkg_upstream[package_id], clean_label, clean_sha,
+        )
+        self._store_version(package_id, clean_label, clean_sha, record)
         return clean_label
 
     # ---------- dependents ----------
@@ -470,29 +808,11 @@ class QuarantineRegistry(gl.Contract):
     def report_advisory(self, package_id: str, advisory_url: str, reported_at: str) -> str:
         assert package_id in self.pkg_name, "unknown package"
         pid = package_id
-        url = advisory_url
-        assert 0 < len(url) <= 400, "advisory url must be 1 to 400 characters"
-        assert not any(ch.isspace() for ch in url), "advisory url must not contain whitespace"
-        assert "?" not in url and "#" not in url, "advisory url must not contain a query or fragment"
-        prefix = self.pkg_prefix[pid]
-        assert url.lower().startswith(prefix), "advisory must come from the package repo"
-        rest = url[len(prefix):]
-        commit = rest[:40]
-        assert _is_sha(commit), "advisory url must pin a 40 character lowercase commit sha"
-        assert rest[40:41] == "/", "advisory url must continue with / after the commit sha"
-        tail = rest[41:]
-        adv_dir = self.pkg_adv_dir[pid]
-        assert tail.startswith(adv_dir), "advisory must live in the package advisory directory"
-        filename = tail[len(adv_dir):]
-        assert len(filename) > 3 and filename.endswith(".md"), "advisory must be a .md file"
-        assert "/" not in filename, "advisory must sit directly in the advisory directory"
-        assert all(ch in PATH_CHARS for ch in filename), "advisory filename has an invalid character"
-        canonical = prefix + rest
+        canonical = self._validate_adv_url(pid, advisory_url)
         assert canonical not in self.adv_by_url, "this advisory url was already reported"
-        open_ids = _split(self.pkg_open_adv_ids[pid])
-        assert len(open_ids) < MAX_OPEN_ADVISORIES, "this package already has 16 open advisories"
+        assert len(_split(self.pkg_adv_ids[pid])) < MAX_ADVISORIES, "this package already has 24 advisories"
 
-        text = _fetch_text(canonical)
+        text = _fetch_many([canonical])[0]
         labels = _split(self.pkg_labels[pid])
         affected = []
         patched = []
@@ -515,31 +835,158 @@ class QuarantineRegistry(gl.Contract):
             summary = str(data.get("summary", "")).strip()[:600]
             if not concerns:
                 status = "REJECTED_NOT_APPLICABLE"
-            elif len(affected) == 0:
-                status = "REJECTED_NO_AFFECTED"
-            elif any(label not in labels for label in affected + patched):
-                status = "REJECTED_UNMAPPED"
-            elif any(label in patched for label in affected):
-                status = "REJECTED_INCONSISTENT"
             else:
-                status = "OPEN"
+                status = _label_status(labels, affected, patched)
 
-        aid = str(int(self.adv_count) + 1)
-        self.adv_count = u256(int(self.adv_count) + 1)
-        self.adv_pkg[aid] = pid
-        self.adv_url[aid] = canonical
-        self.adv_status[aid] = status
-        self.adv_reporter[aid] = self._sender()
-        self.adv_reported_at[aid] = reported_at
-        self.adv_affected[aid] = ",".join(affected)
-        self.adv_patched[aid] = ",".join(patched)
-        self.adv_pattern[aid] = pattern
-        self.adv_summary[aid] = summary
-        self.adv_by_url[canonical] = aid
-        self.pkg_adv_ids[pid] = _append(self.pkg_adv_ids[pid], aid)
-        if status == "OPEN":
-            self.pkg_open_adv_ids[pid] = _append(self.pkg_open_adv_ids[pid], aid)
+        return self._new_advisory(pid, canonical, status, reported_at, affected, patched, [],
+                                  pattern, summary, "root", "")
+
+    @gl.public.write
+    def report_followup(self, advisory_id: str, followup_url: str, reported_at: str) -> str:
+        assert advisory_id in self.adv_status, "unknown advisory"
+        prior = advisory_id
+        assert self.adv_status[prior] == "OPEN", "only an open advisory can be withdrawn or amended"
+        assert self.adv_kind[prior] != "derived", "a derived advisory follows its upstream advisory"
+        pid = self.adv_pkg[prior]
+        canonical = self._validate_adv_url(pid, followup_url)
+        assert canonical not in self.adv_by_url, "this advisory url was already reported"
+        assert len(_split(self.pkg_adv_ids[pid])) < MAX_ADVISORIES, "this package already has 24 advisories"
+
+        text = _fetch_many([canonical])[0]
+        labels = _split(self.pkg_labels[pid])
+        affected = []
+        patched = []
+        pattern = ""
+        summary = ""
+        relation = ""
+        if len(text) > MAX_FILE_CHARS:
+            status = "REJECTED_TOO_LARGE"
+        else:
+            input_text = (
+                "PACKAGE NAME: " + self.pkg_name[pid] + "\n"
+                + "REGISTERED VERSION LABELS: " + ", ".join(labels) + "\n\n"
+                + "EARLIER ADVISORY " + prior + ":\n"
+                + "summary: " + self.adv_summary[prior] + "\n"
+                + "affected: " + self.adv_affected[prior] + "\n"
+                + "patched: " + self.adv_patched[prior] + "\n"
+                + "flaw: " + self.adv_pattern[prior] + "\n"
+                + "source: " + self.adv_url[prior] + "\n\n"
+                + "NEW ADVISORY TEXT:\n" + text
+            )
+            data = _run_llm(input_text, FOLLOWUP_TASK, FOLLOWUP_CRITERIA)
+            relation = str(data.get("relation", "")).strip().lower()
+            summary = str(data.get("summary", "")).strip()[:600]
+            if relation == "withdraws":
+                status = "WITHDRAWAL"
+            elif relation == "amends":
+                affected = _unique(_str_list(data.get("affected_labels")))
+                patched = _unique(_str_list(data.get("patched_labels")))
+                pattern = str(data.get("vulnerable_pattern", "")).strip()[:600]
+                if pattern == "":
+                    pattern = self.adv_pattern[prior]
+                status = _label_status(labels, affected, patched)
+            else:
+                status = "REJECTED_UNRELATED"
+
+        kind = "amendment" if relation == "amends" else "followup"
+        aid = self._new_advisory(pid, canonical, status, reported_at, affected, patched, [],
+                                 pattern, summary, kind, prior)
+        if status == "WITHDRAWAL":
+            self.adv_status[prior] = "WITHDRAWN"
+            self.pkg_open_adv_ids[pid] = _remove(self.pkg_open_adv_ids[pid], prior)
+        elif status == "OPEN":
+            self.adv_status[prior] = "SUPERSEDED"
+            self.adv_successor[prior] = aid
+            self.pkg_open_adv_ids[pid] = _remove(self.pkg_open_adv_ids[pid], prior)
         return aid
+
+    # ---------- transitive exposure ----------
+
+    @gl.public.write
+    def propagate(self, advisory_id: str, downstream_package_id: str, label: str,
+                  propagated_at: str) -> str:
+        assert advisory_id in self.adv_status, "unknown advisory"
+        aid = advisory_id
+        assert self.adv_status[aid] == "OPEN", "only an open advisory can propagate"
+        assert self._parent_active(aid), "the upstream advisory is no longer in force"
+        q = downstream_package_id
+        assert q in self.pkg_name, "unknown package"
+        assert self.pkg_upstream[q] == self.adv_pkg[aid], "that package does not vendor this advisory's package"
+        dkey = aid + "|" + q
+        existing = self.pkg_derived[dkey] if dkey in self.pkg_derived else ""
+        if existing == "":
+            assert len(_split(self.pkg_adv_ids[q])) < MAX_ADVISORIES, "this package already has 24 advisories"
+
+        parent_affected = _split(self.adv_affected[aid])
+        parent_uncertain = _split(self.adv_uncertain[aid])
+        states = {}
+        for v in _split(self.pkg_labels[q]):
+            skey = existing + "|" + v
+            if existing != "" and skey in self.prop_state:
+                states[v] = self.prop_state[skey]
+                continue
+            vendored = self.ver_vendored[q + "|" + v]
+            if vendored != "" and vendored not in parent_affected and vendored not in parent_uncertain:
+                states[v] = "clean"
+            else:
+                states[v] = "todo"
+
+        target = label.strip()
+        reasoning = ""
+        minority = ""
+        if target != "":
+            assert target in states, "unknown version label"
+            assert states[target] == "todo", "this version needs no judgment"
+            data = self._judge_propagation(aid, q, target, False)
+            states[target] = _verdict(data, ("exposed", "neutralized"), "unclear")
+            reasoning = str(data.get("reasoning", "")).strip()[:1200]
+            minority = str(data.get("minority_note", "")).strip()[:600]
+        else:
+            assert existing == "", "name a wrapper version to judge"
+
+        did = existing
+        if did == "":
+            did = self._new_advisory(
+                q, "", "PENDING", propagated_at, [], [], [], self.adv_pattern[aid],
+                "Inherited from advisory " + aid + " through the vendored upstream.", "derived", aid,
+            )
+            self.pkg_derived[dkey] = did
+        for v in states:
+            self.prop_state[did + "|" + v] = states[v]
+        if target != "":
+            key = did + "|" + target
+            self.prop_path[key] = "consensus"
+            self.prop_reason[key] = reasoning
+            self.prop_minority[key] = minority
+            self.prop_assessor[key] = self._sender()
+            self.prop_at[key] = propagated_at
+        self._refresh_derived(did)
+        return did
+
+    @gl.public.write
+    def escalate_propagation(self, derived_advisory_id: str, label: str, escalated_at: str) -> str:
+        did = derived_advisory_id
+        assert did in self.adv_status, "unknown advisory"
+        assert self.adv_kind[did] == "derived", "only a derived advisory has propagation verdicts"
+        key = did + "|" + label
+        assert key in self.prop_state and self.prop_state[key] == "unclear", "only an unclear version can be escalated"
+        esc_key = "prop|" + key
+        assert esc_key not in self.esc_used, "this version has already been escalated"
+        parent = self.adv_parent[did]
+        assert self.adv_status[parent] in IN_FORCE, "the upstream advisory is no longer in force"
+        q = self.adv_pkg[did]
+
+        data = self._judge_propagation(parent, q, label, True)
+        verdict = _verdict(data, ("exposed", "neutralized"), "unclear")
+
+        self.esc_used[esc_key] = "1"
+        self.prop_state[key] = verdict
+        self.prop_path[key] = "escalation"
+        self.prop_reason[key] = str(data.get("reasoning", "")).strip()[:1200]
+        self.prop_minority[key] = str(data.get("minority_note", "")).strip()[:600]
+        self.prop_assessor[key] = self._sender()
+        self.prop_at[key] = escalated_at
+        return self._refresh_derived(did)
 
     # ---------- assessment ----------
 
@@ -548,21 +995,23 @@ class QuarantineRegistry(gl.Contract):
         assert advisory_id in self.adv_status, "unknown advisory"
         assert dependent_id in self.dep_pkg, "unknown dependent"
         assert self.adv_status[advisory_id] == "OPEN", "advisory is not open"
+        assert self._parent_active(advisory_id), "the upstream advisory is no longer in force"
         pid = self.adv_pkg[advisory_id]
         assert self.dep_pkg[dependent_id] == pid, "dependent does not use this package"
         key = advisory_id + "|" + dependent_id
         was_contained = key in self.as_ever_contained and self.as_ever_contained[key] == "1"
-        src = self.pkg_source_path[pid]
         affected = _split(self.adv_affected[advisory_id])
+        uncertain = _split(self.adv_uncertain[advisory_id])
         patched = _split(self.adv_patched[advisory_id])
         exposed_state = "PATCH_REQUIRED" if len(patched) > 0 else "QUARANTINED"
         clear_state = "RESTORED" if was_contained else "UNAFFECTED"
 
-        text = _fetch_text(self.dep_prefix[dependent_id] + self.dep_sha[dependent_id] + "/" + src)
-        file_hash = _sha256(text)
+        fetched = self._dependent_text(dependent_id)
+        text = fetched[0]
+        file_hash = fetched[1]
 
-        if len(text) > MAX_FILE_CHARS:
-            reason = ("The pinned file exceeds 12000 characters. Quarantine never truncates "
+        if fetched[2]:
+            reason = ("A pinned file exceeds 12000 characters. Quarantine never truncates "
                       "evidence, so the deployment is held instead of guessed.")
             return self._record(key, dependent_id, "EVIDENCE_CONFLICT", "size", "", file_hash,
                                 reason, "", "too_large", assessed_at)
@@ -572,17 +1021,25 @@ class QuarantineRegistry(gl.Contract):
             label = self.ver_by_hash[hash_key]
             if label in affected:
                 state = exposed_state
-                reason = ("The pinned file is byte-identical to registered version " + label
+                conflict = ""
+                reason = ("The pinned code is byte-identical to registered version " + label
                           + ", which this advisory lists as affected. Decided in code, no consensus spent.")
+            elif label in uncertain:
+                state = "EVIDENCE_CONFLICT"
+                conflict = "inherited_unclear"
+                reason = ("The pinned code is byte-identical to registered version " + label
+                          + ", whose exposure through its vendored upstream is still unresolved. "
+                          + "Held, not disabled. Escalate that version's propagation to settle it.")
             else:
                 state = clear_state
-                reason = ("The pinned file is byte-identical to registered version " + label
+                conflict = ""
+                reason = ("The pinned code is byte-identical to registered version " + label
                           + ", which this advisory does not list as affected. Decided in code, no consensus spent.")
             return self._record(key, dependent_id, state, "hash", label, file_hash,
-                                reason, "", "", assessed_at)
+                                reason, "", conflict, assessed_at)
 
         data = self._judge(pid, advisory_id, text, False)
-        verdict = str(data.get("verdict", "")).strip().lower()
+        verdict = _verdict(data, ("exposed", "not_exposed"), "unclear")
         reasoning = str(data.get("reasoning", "")).strip()[:1200]
         minority = str(data.get("minority_note", "")).strip()[:600]
         if verdict == "exposed":
@@ -600,6 +1057,9 @@ class QuarantineRegistry(gl.Contract):
         assert key in self.as_state, "no assessment to escalate"
         assert self.as_state[key] == "EVIDENCE_CONFLICT", "only an evidence conflict can be escalated"
         assert self.as_conflict[key] != "too_large", "an oversized file cannot be escalated; re-pin a smaller file"
+        assert self.as_conflict[key] != "inherited_unclear", (
+            "this conflict is inherited; escalate the wrapper version's propagation instead"
+        )
         assert self.adv_status[advisory_id] == "OPEN", "advisory is not open"
         assert self.as_pin_nonce[key] == self.dep_pin_nonce[dependent_id], "pin changed since the assessment; reassess first"
         file_hash = self.as_hash[key]
@@ -607,14 +1067,13 @@ class QuarantineRegistry(gl.Contract):
         assert esc_key not in self.esc_used, "this evidence has already been escalated"
 
         pid = self.adv_pkg[advisory_id]
-        src = self.pkg_source_path[pid]
         patched = _split(self.adv_patched[advisory_id])
         exposed_state = "PATCH_REQUIRED" if len(patched) > 0 else "QUARANTINED"
 
-        text = _fetch_text(self.dep_prefix[dependent_id] + self.dep_sha[dependent_id] + "/" + src)
-        assert _sha256(text) == file_hash, "pinned file changed since the assessment; reassess first"
-        data = self._judge(pid, advisory_id, text, True)
-        verdict = str(data.get("verdict", "")).strip().lower()
+        fetched = self._dependent_text(dependent_id)
+        assert fetched[1] == file_hash, "pinned file changed since the assessment; reassess first"
+        data = self._judge(pid, advisory_id, fetched[0], True)
+        verdict = _verdict(data, ("exposed", "not_exposed"), "unresolved")
         reasoning = str(data.get("reasoning", "")).strip()[:1200]
         minority = str(data.get("minority_note", "")).strip()[:600]
 
@@ -648,7 +1107,13 @@ class QuarantineRegistry(gl.Contract):
         versions = []
         for label in _split(self.pkg_labels[package_id]):
             k = package_id + "|" + label
-            versions.append({"label": label, "sha": self.ver_sha[k], "file_hash": self.ver_hash[k]})
+            versions.append({
+                "label": label,
+                "sha": self.ver_sha[k],
+                "file_hash": self.ver_hash[k],
+                "source_hash": self.ver_src_hash[k],
+                "vendored": self.ver_vendored[k],
+            })
         return {
             "id": package_id,
             "name": self.pkg_name[package_id],
@@ -656,6 +1121,8 @@ class QuarantineRegistry(gl.Contract):
             "repo_prefix": self.pkg_prefix[package_id],
             "source_path": self.pkg_source_path[package_id],
             "advisory_dir": self.pkg_adv_dir[package_id],
+            "upstream": self.pkg_upstream[package_id],
+            "vendor_path": self.pkg_vendor_path[package_id],
             "versions": versions,
             "dependent_ids": _split(self.pkg_dep_ids[package_id]),
             "advisory_ids": _split(self.pkg_adv_ids[package_id]),
@@ -684,12 +1151,50 @@ class QuarantineRegistry(gl.Contract):
             "package_id": self.adv_pkg[advisory_id],
             "url": self.adv_url[advisory_id],
             "status": self.adv_status[advisory_id],
+            "kind": self.adv_kind[advisory_id],
+            "parent": self.adv_parent[advisory_id],
+            "successor": self.adv_successor[advisory_id],
+            "in_force": self.adv_status[advisory_id] in IN_FORCE and self._parent_active(advisory_id),
             "reporter": self.adv_reporter[advisory_id],
             "reported_at": self.adv_reported_at[advisory_id],
             "affected_labels": _split(self.adv_affected[advisory_id]),
             "patched_labels": _split(self.adv_patched[advisory_id]),
+            "uncertain_labels": _split(self.adv_uncertain[advisory_id]),
             "vulnerable_pattern": self.adv_pattern[advisory_id],
             "summary": self.adv_summary[advisory_id],
+        }
+
+    @gl.public.view
+    def get_derived(self, advisory_id: str, package_id: str) -> str:
+        key = advisory_id + "|" + package_id
+        if key in self.pkg_derived:
+            return self.pkg_derived[key]
+        return ""
+
+    @gl.public.view
+    def get_propagation(self, derived_advisory_id: str) -> dict:
+        did = derived_advisory_id
+        assert did in self.adv_kind and self.adv_kind[did] == "derived", "not a derived advisory"
+        q = self.adv_pkg[did]
+        rows = []
+        for label in _split(self.pkg_labels[q]):
+            k = did + "|" + label
+            rows.append({
+                "label": label,
+                "vendored": self.ver_vendored[q + "|" + label],
+                "state": self.prop_state[k] if k in self.prop_state else "todo",
+                "path": self.prop_path[k] if k in self.prop_path else "",
+                "reasoning": self.prop_reason[k] if k in self.prop_reason else "",
+                "minority_note": self.prop_minority[k] if k in self.prop_minority else "",
+                "assessor": self.prop_assessor[k] if k in self.prop_assessor else "",
+                "at": self.prop_at[k] if k in self.prop_at else "",
+            })
+        return {
+            "id": did,
+            "parent": self.adv_parent[did],
+            "package_id": q,
+            "status": self.adv_status[did],
+            "versions": rows,
         }
 
     @gl.public.view

@@ -21,6 +21,8 @@ export function RegisterPackageForm({
   const [path, setPath] = useState("skills/");
   const [dir, setDir] = useState("security");
   const [versions, setVersions] = useState("");
+  const [upstream, setUpstream] = useState("");
+  const [vendorPath, setVendorPath] = useState("");
   const [err, setErr] = useState("");
 
   async function submit() {
@@ -47,18 +49,33 @@ export function RegisterPackageForm({
         return;
       }
     }
+    if ((upstream.trim() === "") !== (vendorPath.trim() === "")) {
+      setErr("An upstream package and a vendor path go together. Fill both or neither.");
+      return;
+    }
     setErr("");
     const me = address ?? "";
     const pkgName = name.trim();
     const ok = await run(
       "Register package",
-      () => registerPackage(pkgName, prefix.trim(), path.trim(), dir.trim(), lines.join(",")),
+      () =>
+        registerPackage(
+          pkgName,
+          prefix.trim(),
+          path.trim(),
+          dir.trim(),
+          lines.join(","),
+          upstream.trim(),
+          vendorPath.trim(),
+        ),
       () => after(pkgName, me),
     );
     if (ok) {
       setOpen(false);
       setName("");
       setVersions("");
+      setUpstream("");
+      setVendorPath("");
     }
   }
 
@@ -93,13 +110,26 @@ export function RegisterPackageForm({
         <input className="mono" value={dir} onChange={(e) => setDir(e.target.value)} />
       </label>
       <label className="field">
-        <span>Versions, one per line as label:commit</span>
+        <span>Versions, one per line as label:commit. Each label must also exist as a git tag.</span>
         <textarea
           className="mono"
           rows={4}
           value={versions}
           onChange={(e) => setVersions(e.target.value)}
           placeholder={"1.0:<40-char commit>\n1.1:<40-char commit>"}
+        />
+      </label>
+      <label className="field">
+        <span>Upstream package id (only if this skill vendors another)</span>
+        <input className="mono" value={upstream} onChange={(e) => setUpstream(e.target.value)} placeholder="2" />
+      </label>
+      <label className="field">
+        <span>Vendor path (where the upstream copy lives)</span>
+        <input
+          className="mono"
+          value={vendorPath}
+          onChange={(e) => setVendorPath(e.target.value)}
+          placeholder="vendor/payout_skill.py"
         />
       </label>
       <div className="form-actions">
@@ -110,7 +140,10 @@ export function RegisterPackageForm({
           Cancel
         </button>
       </div>
-      <p className="hint">The contract fetches every version and stores the sha256 of its bytes. You become the maintainer.</p>
+      <p className="hint">
+        The contract fetches every version at its commit and at its tag, and the bytes must match. You become the
+        maintainer.
+      </p>
       {err && <p className="form-error">{err}</p>}
     </div>
   );
@@ -189,7 +222,10 @@ export function RegisterDependentForm({
           Cancel
         </button>
       </div>
-      <p className="hint">The pinned file must sit at {pkg.source_path} in that repo. You become the owner.</p>
+      <p className="hint">
+        The pinned file must sit at {pkg.source_path} in that repo
+        {pkg.vendor_path ? `, with its vendored copy at ${pkg.vendor_path}` : ""}. You become the owner.
+      </p>
       {err && <p className="form-error">{err}</p>}
     </div>
   );
